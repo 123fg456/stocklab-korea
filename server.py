@@ -53,12 +53,21 @@ def market_data(ticker):
  changes={str(n):finite((last/float(close.iloc[-n-1])-1)*100) if len(close)>n else None for n in [5,20,60]}
  return {'date':date,'price':last,'ma':ma,'rsi':rsi,'support':finite(support),'resistance':finite(resistance),'target1':finite(target1),'target2':finite(target2),'stop':finite(stop),'rr':finite(rr),'daily':daily,'changes':changes,'rows':len(prices),'close_series':close,'volume_series':volume}
 
-def flows_data(ticker, price):
+def flows_data(ticker, price, latest_date=None):
  from pykrx import stock
- end=datetime.now(KST).strftime('%Y%m%d'); start=(datetime.now(KST)-timedelta(days=240)).strftime('%Y%m%d')
- # Investor net trading value by date (KRW), NOT estimated cost basis.
- df=stock.get_market_trading_value_by_date(start,end,ticker)
- if df is None or df.empty: raise RuntimeError('투자자별 수급 데이터가 제공되지 않았습니다.')
+ end=(latest_date or datetime.now(KST).strftime('%Y-%m-%d')).replace('-','')
+ start=(datetime.strptime(end,'%Y%m%d')-timedelta(days=240)).strftime('%Y%m%d')
+ # The KRX endpoint used by pykrx can fail independently of the OHLCV endpoint.
+ # Try different available API signatures; never replace missing flows with estimates.
+ attempts=[];df=None
+ for kw in ({'on':'순매수'},{}):
+  try:
+   candidate=stock.get_market_trading_value_by_date(start,end,ticker,**kw)
+   if candidate is not None and not candidate.empty:
+    df=candidate;break
+   attempts.append('빈 응답')
+  except Exception as e:attempts.append(type(e).__name__+': '+str(e)[:110])
+ if df is None or df.empty:raise RuntimeError('KRX 투자자별 순매수 응답 없음 ('+'; '.join(attempts)+'). 제공처 장애 또는 접속 제한 가능성')
  df=df.sort_index()
  foreign=next((c for c in df.columns if '외국인합계' in str(c)),None)
  if foreign is None: foreign=next((c for c in df.columns if '외국인' in str(c)),None)
@@ -104,7 +113,7 @@ def score_result(m,f):
  # No invented points for missing financial/industry/news data. Display only verified subscore.
  known=20+(35 if flow_score is not None else 0)
  earned=tech+(flow_score or 0)
- return {'technical':tech,'flow':flow_score,'known_points':known,'earned_points':earned,'score_out_of_known':round(100*earned/known,1) if known else None,'total_score':None,'missing':['실적·밸류에이션 20점','시장·업종 15점','뉴스·이벤트 10점']+(['외국인·기관 수급 35점'] if flow_score is None else []),'flow_details':details}
+ return {'technical':tech,'flow':flow_score,'known_points':known,'earned_points':earned,'score_out_of_known':None,'total_score':None,'missing':['실적·밸류에이션 20점','시장·업종 15점','뉴스·이벤트 10점']+(['외국인·기관 수급 35점'] if flow_score is None else []),'flow_details':details}
 
 def optional_ai(payload):
  key=os.getenv('OPENAI_API_KEY','').strip()
@@ -141,7 +150,7 @@ def analyze():
   if mode not in ('trade','tenbagger'):return jsonify(error='잘못된 분석 모드'),400
   ticker,name=load_ticker(q); market=market_data(ticker)
   warnings=[]
-  try:flows=flows_data(ticker,market['price'])
+  try:flows=flows_data(ticker,market['price'],market['date'])
   except Exception as e:flows=None;warnings.append('외국인·기관 수급 조회 실패: '+str(e)[:160])
   fundamentals=fundamental_data(ticker,market['date'])
   if fundamentals is None:warnings.append('PER/PBR 최신 스냅샷 조회 불가')
